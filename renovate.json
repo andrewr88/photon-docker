@@ -13,5 +13,13 @@
       "depNameTemplate": "komoot/photon",
       "datasourceTemplate": "github-releases"
     }
-  ]
+  ],
+  
+  "docker": {
+    "enabled": true
+  },
+  
+  "dockerfile": {
+    "fileMatch": ["Dockerfile"]
+  }
 }
