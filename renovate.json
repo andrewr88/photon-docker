@@ -3,10 +3,12 @@
   "extends": [
     "config:recommended"
   ],
-
   "customManagers": [
     {
-      "fileMatch": ["^Dockerfile$"],
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
       "matchStrings": [
         "ARG PHOTON_VERSION=(?<currentValue>.*?)\n"
       ],
@@ -14,14 +16,18 @@
       "datasourceTemplate": "github-releases"
     }
   ],
-  
-  "docker": {
-    "enabled": true
-  },
-  
   "dockerfile": {
-    "fileMatch": ["Dockerfile"]
+    "managerFilePatterns": [
+      "/Dockerfile/"
+    ]
   },
-
-  "forkProcessing": "enabled"
+  "forkProcessing": "enabled",
+  "packageRules": [
+    {
+      "matchCategories": [
+        "docker"
+      ],
+      "enabled": true
+    }
+  ]
 }
