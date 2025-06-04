@@ -7,7 +7,7 @@ DATA_DIR="/photon/photon_data"
 NODE_DIR="$DATA_DIR/node_1"
 TEMP_DIR="$DATA_DIR/temp_download"
 MD5_FILE="$DATA_DIR/current.md5"
-JAVA_PID_FILE="$DATA_DIR/photon.pid"
+JAVA_PID_FILE="/tmp/photon.pid"
 LAST_MD5_FILE="$DATA_DIR/last_known.md5"
 
 # URLs
@@ -142,6 +142,20 @@ download_md5() {
 start_photon() {
     echo "Starting Photon..."
     
+    # Check if photon.jar exists
+    if [ ! -f "photon.jar" ]; then
+        echo "ERROR: photon.jar not found in current directory: $(pwd)"
+        echo "Directory contents:"
+        ls -la
+        return 1
+    fi
+    
+    # Check if Java is available
+    if ! command -v java >/dev/null 2>&1; then
+        echo "ERROR: Java is not installed or not in PATH"
+        return 1
+    fi
+    
     # Clean up any stale PID file
     if [ -f "$JAVA_PID_FILE" ]; then
         local old_pid
@@ -154,14 +168,19 @@ start_photon() {
         fi
     fi
     
-    # Start Java process
-    if ! java -jar photon.jar "$@" & then
-        echo "Failed to start Java process"
+    # Start Java process - correct syntax for background processes
+    echo "Executing: java -jar photon.jar $*"
+    java -jar photon.jar "$@" &
+    local java_pid=$!
+    
+    # Check if the background process was started successfully
+    if [ -z "$java_pid" ] || [ "$java_pid" -le 0 ]; then
+        echo "ERROR: Failed to start Java process - invalid PID"
         return 1
     fi
     
-    local java_pid=$!
     echo "$java_pid" > "$JAVA_PID_FILE"
+    echo "Java process started with PID $java_pid, waiting for startup..."
     
     # Wait a moment and verify it started
     sleep 3
@@ -169,7 +188,12 @@ start_photon() {
         echo "Photon started successfully with PID $java_pid"
         return 0
     else
-        echo "Failed to start Photon"
+        echo "ERROR: Photon process died shortly after startup"
+        echo "Checking if process exited with error..."
+        wait "$java_pid" 2>/dev/null || local exit_code=$?
+        if [ -n "${exit_code:-}" ]; then
+            echo "Java process exited with code: $exit_code"
+        fi
         rm -f "$JAVA_PID_FILE"
         return 1
     fi
