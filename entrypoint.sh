@@ -2,7 +2,7 @@
 
 
 # Download elasticsearch index
-if [ ! -d "/photon/photon_data/opensearch" ]; then
+if [ ! -d "/photon/photon_data/node_1" ]; then
     echo "Downloading search index"
 
     # Let graphhopper know where the traffic is coming from
@@ -15,7 +15,7 @@ if [ ! -d "/photon/photon_data/opensearch" ]; then
 fi
 
 # Start photon if elastic index exists
-if [ -d "/photon/photon_data/opensearch" ]; then
+if [ -d "/photon/photon_data/node_1" ]; then
     echo "Start photon"
     java -jar photon.jar $@
 else
