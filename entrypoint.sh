@@ -247,7 +247,7 @@ perform_hot_swap() {
     echo "Downloading new index to temporary location..."
     if download_and_extract "$TEMP_DIR" "true"; then
         # Verify the temp directory has the expected structure
-        if [ -d "$TEMP_DIR/photon_data/node_1" ]; then
+        if [ -d "$TEMP_DIR/node_1" ]; then
             echo "Download successful, preparing to swap directories"
             
             # Stop current Photon instance
@@ -269,7 +269,7 @@ perform_hot_swap() {
             
             # Move new directory into place
             echo "Moving new index into place"
-            if ! mv "$TEMP_DIR/photon_data/node_1" "$NODE_DIR"; then
+            if ! mv "$TEMP_DIR/node_1" "$NODE_DIR"; then
                 echo "ERROR: Failed to move new directory, restoring backup"
                 if [ -d "$backup_dir" ]; then
                     if ! mv "$backup_dir" "$NODE_DIR"; then
