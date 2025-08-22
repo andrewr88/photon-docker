@@ -183,9 +183,13 @@ start_photon() {
         fi
     fi
 
-    # Start Java process - correct syntax for background processes
+    # Start Java process with Docker/cgroup compatibility flags
     echo "Executing: java -jar photon.jar $*"
-    java -jar photon.jar "$@" &
+    java -XX:+UseContainerSupport \
+         -XX:+UnlockExperimentalVMOptions \
+         -XX:+UseCGroupMemoryLimitForHeap \
+         -Djdk.lang.Process.launchMechanism=vfork \
+         -jar photon.jar "$@" &
     local java_pid=$!
 
     # Check if the background process was started successfully
