@@ -89,6 +89,21 @@ download_and_extract() {
         if bzip2 -dc "$temp_file" | tar x -C "$target_dir"; then
             echo "Successfully downloaded and extracted index"
             rm -f "$temp_file"
+
+            # Handle nested photon_data directory structure
+            if [ -d "$target_dir/photon_data" ] && [ ! -d "$target_dir/node_1" ]; then
+                echo "Detected nested photon_data structure, flattening..."
+                # Move contents up one level
+                if mv "$target_dir/photon_data"/* "$target_dir/" 2>/dev/null; then
+                    rmdir "$target_dir/photon_data"
+                    echo "Successfully flattened directory structure"
+                else
+                    echo "Failed to flatten directory structure"
+                    rm -rf "$target_dir"
+                    return 1
+                fi
+            fi
+
             return 0
         else
             echo "Failed to extract downloaded file"
