@@ -72,6 +72,13 @@ download_and_extract() {
         return 1
     fi
 
+    # Create troubleshooting directory for keeping compressed files
+    local troubleshoot_dir="$DATA_DIR/troubleshoot"
+    mkdir -p "$troubleshoot_dir"
+
+    # Clean up old troubleshooting files (keep only last 2 downloads)
+    find "$troubleshoot_dir" -name "photon-db-*.tar.bz2" -type f 2>/dev/null | sort -r | tail -n +3 | xargs rm -f
+
     # For streaming downloads, we can't use --continue with piping
     # Download to file first, then extract
     local temp_file="$target_dir/photon-db.tar.bz2"
@@ -88,6 +95,19 @@ download_and_extract() {
         echo "Download completed, extracting..."
         if bzip2 -dc "$temp_file" | tar x -C "$target_dir"; then
             echo "Successfully downloaded and extracted index"
+
+            # Keep the compressed file for troubleshooting with timestamp
+            local timestamp
+            timestamp=$(date +"%Y%m%d_%H%M%S")
+            local saved_file="$troubleshoot_dir/photon-db-${timestamp}.tar.bz2"
+            echo "Saving compressed file for troubleshooting: $saved_file"
+            if cp "$temp_file" "$saved_file"; then
+                echo "Compressed file saved successfully"
+            else
+                echo "Warning: Failed to save compressed file for troubleshooting"
+            fi
+
+            # Remove temp file from target directory
             rm -f "$temp_file"
 
             # Handle nested photon_data directory structure
