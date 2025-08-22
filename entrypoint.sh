@@ -186,8 +186,6 @@ start_photon() {
     # Start Java process with Docker/cgroup compatibility flags
     echo "Executing: java -jar photon.jar $*"
     java -XX:+UseContainerSupport \
-         -XX:+UnlockExperimentalVMOptions \
-         -XX:+UseCGroupMemoryLimitForHeap \
          -Djdk.lang.Process.launchMechanism=vfork \
          -jar photon.jar "$@" &
     local java_pid=$!
