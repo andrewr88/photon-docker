@@ -12,7 +12,7 @@ LAST_MD5_FILE="$DATA_DIR/last_known.md5"
 
 # URLs
 USER_AGENT="docker: tonsnoei/photon-geocoder"
-INDEX_URL="https://download1.graphhopper.com/public/experimental/photon-db-latest.tar.bz2"
+INDEX_URL="https://download1.graphhopper.com/public/photon-db-planet-0.7OS-latest.tar.bz2"
 MD5_URL="${INDEX_URL}.md5"
 
 # Global variables for signal handling
