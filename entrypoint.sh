@@ -218,7 +218,7 @@ start_photon() {
          -XX:+IgnoreUnrecognizedVMOptions \
          -Djdk.lang.Process.launchMechanism=vfork \
          -Dcom.sun.management.jmxremote=false \
-         -jar photon.jar "$@" &
+         -jar photon.jar -listen-ip 0.0.0.0 "$@" &
     local pid=$!
     [ -n "$pid" ] && [ "$pid" -gt 0 ] || { log "ERROR: failed to launch java"; return 1; }
     echo "$pid" > "$JAVA_PID_FILE"
