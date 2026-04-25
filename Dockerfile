@@ -1,5 +1,5 @@
 FROM openjdk:11.0.16-jre
-ARG PHOTON_VERSION=0.7.4
+ARG PHOTON_VERSION=1.1.0
 
 # Install pbzip2 for parallel extraction
 RUN apt-get update \
@@ -9,7 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /photon
-ADD https://github.com/komoot/photon/releases/download/${PHOTON_VERSION}/photon-opensearch-${PHOTON_VERSION}.jar /photon/photon.jar
+ADD https://github.com/komoot/photon/releases/download/${PHOTON_VERSION}/photon-${PHOTON_VERSION}.jar /photon/photon.jar
 COPY entrypoint.sh ./entrypoint.sh
 
 VOLUME /photon/photon_data
