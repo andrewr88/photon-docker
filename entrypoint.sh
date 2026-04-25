@@ -2,539 +2,328 @@
 
 set -euo pipefail
 
-# Configuration
+# ---------- configuration ----------
+
 DATA_DIR="/photon/photon_data"
 NODE_DIR="$DATA_DIR/node_1"
-TEMP_DIR="$DATA_DIR/temp_download"
-MD5_FILE="$DATA_DIR/current.md5"
-JAVA_PID_FILE="/tmp/photon.pid"
+STAGED_DIR="$DATA_DIR/staged"
+STAGED_NODE="$STAGED_DIR/node_1"
+STAGED_MD5_FILE="$STAGED_DIR/version.md5"
 LAST_MD5_FILE="$DATA_DIR/last_known.md5"
+JAVA_PID_FILE="/tmp/photon.pid"
 
-# URLs
 USER_AGENT="docker: tonsnoei/photon-geocoder"
 INDEX_URL="https://download1.graphhopper.com/public/photon-db-planet-1.0-latest.tar.bz2"
 MD5_URL="${INDEX_URL}.md5"
 
-# Global variables for signal handling
+# How often to poll for a new index (seconds). Default: 24h.
+UPDATE_CHECK_INTERVAL_SECONDS="${UPDATE_CHECK_INTERVAL_SECONDS:-86400}"
+
+# ntfy notification config. All three must be set to enable notifications.
+NTFY_URL="${NTFY_URL:-}"
+NTFY_TOPIC="${NTFY_TOPIC:-}"
+NTFY_TOKEN="${NTFY_TOKEN:-}"
+
 BACKGROUND_PID=""
 MAIN_PID=""
 
-# Function to check available disk space
-check_disk_space() {
-    local required_space_gb=250  # Conservative estimate: 100GB download + 100GB extract + 50GB buffer
-    local available_kb
-    available_kb=$(df "$DATA_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
-    local available_gb=$((available_kb / 1024 / 1024))
+# ---------- helpers ----------
 
-    echo "Available disk space: ${available_gb}GB"
-    if [ "$available_gb" -lt "$required_space_gb" ]; then
-        echo "ERROR: Insufficient disk space. Need at least ${required_space_gb}GB, have ${available_gb}GB"
-        return 1
-    fi
-    return 0
-}
+log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
 
-# Function to validate PID
 is_process_running() {
     local pid="$1"
     [ -n "$pid" ] && [ "$pid" -gt 0 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null
 }
 
-# Function to safely read MD5 file
 read_md5_file() {
     local file="$1"
-    if [ -f "$file" ] && [ -s "$file" ]; then
-        local md5_value
-        md5_value=$(cat "$file" 2>/dev/null | head -1 | tr -d '[:space:]' || echo "")
-        if [[ "$md5_value" =~ ^[a-fA-F0-9]{32}$ ]]; then
-            echo "$md5_value"
-            return 0
-        fi
+    [ -f "$file" ] && [ -s "$file" ] || return 1
+    local v
+    v=$(awk '{print $1}' "$file" 2>/dev/null | head -1 | tr -d '[:space:]')
+    [[ "$v" =~ ^[a-fA-F0-9]{32}$ ]] || return 1
+    echo "$v"
+}
+
+is_node_dir_valid() {
+    local d="$1"
+    [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]
+}
+
+check_disk_space() {
+    local required_gb=250
+    local kb gb
+    kb=$(df "$DATA_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+    gb=$((kb / 1024 / 1024))
+    log "Available disk space: ${gb}GB"
+    if [ "$gb" -lt "$required_gb" ]; then
+        log "ERROR: need ${required_gb}GB, have ${gb}GB"
+        return 1
     fi
+}
+
+# ---------- ntfy ----------
+
+ntfy_send() {
+    local title="$1"
+    local message="$2"
+    if [ -z "$NTFY_URL" ] || [ -z "$NTFY_TOPIC" ] || [ -z "$NTFY_TOKEN" ]; then
+        return 0
+    fi
+    local url="${NTFY_URL%/}/$NTFY_TOPIC"
+    log "Sending ntfy notification to $url"
+    if ! wget --quiet \
+            --method=POST \
+            --header="Authorization: Bearer $NTFY_TOKEN" \
+            --header="Title: $title" \
+            --body-data="$message" \
+            -O /dev/null \
+            "$url"; then
+        log "Warning: ntfy notification failed"
+    fi
+}
+
+# ---------- download ----------
+
+fetch_remote_md5() {
+    local tmp tries=3 n=0 v
+    tmp=$(mktemp)
+    while [ "$n" -lt "$tries" ]; do
+        if wget --user-agent="$USER_AGENT" --timeout=30 --tries=2 -q -O "$tmp" "$MD5_URL"; then
+            v=$(awk '{print $1}' "$tmp" | head -1 | tr -d '[:space:]')
+            if [[ "$v" =~ ^[a-fA-F0-9]{32}$ ]]; then
+                rm -f "$tmp"
+                echo "$v"
+                return 0
+            fi
+        fi
+        n=$((n + 1))
+        [ "$n" -lt "$tries" ] && sleep 2
+    done
+    rm -f "$tmp"
     return 1
 }
 
-# Function to download and extract index with better error handling
+# Download archive into $1 and extract so $1/node_1 is populated.
 download_and_extract() {
     local target_dir="$1"
-    local is_temp="$2"
+    log "Downloading index into $target_dir"
 
-    echo "Downloading search index to $target_dir"
+    check_disk_space || return 1
+    mkdir -p "$target_dir" || return 1
 
-    # Check disk space before starting
-    if ! check_disk_space; then
+    local archive="$target_dir/photon-db.tar.bz2"
+    log "Starting download of $(basename "$INDEX_URL")"
+    if ! wget --user-agent="$USER_AGENT" \
+            --timeout=300 \
+            --tries=3 \
+            --continue \
+            --progress=dot:giga \
+            -O "$archive" "$INDEX_URL"; then
+        log "Download failed"
+        rm -f "$archive"
         return 1
     fi
 
-    # Create target directory
-    if ! mkdir -p "$target_dir"; then
-        echo "ERROR: Failed to create target directory: $target_dir"
+    log "Extracting..."
+    if ! bzip2 -dc "$archive" | tar x -C "$target_dir"; then
+        log "Extraction failed"
+        rm -f "$archive"
         return 1
     fi
+    rm -f "$archive"
 
-    # Create troubleshooting directory for keeping compressed files
-    local troubleshoot_dir="$DATA_DIR/troubleshoot"
-    mkdir -p "$troubleshoot_dir"
+    # Some archive layouts wrap the data in a nested photon_data/ directory.
+    if [ -d "$target_dir/photon_data" ] && [ ! -d "$target_dir/node_1" ]; then
+        log "Flattening nested photon_data/"
+        mv "$target_dir/photon_data"/* "$target_dir/" || return 1
+        rmdir "$target_dir/photon_data"
+    fi
 
-    # Clean up old troubleshooting files (keep only last 2 downloads)
-    find "$troubleshoot_dir" -name "photon-db-*.tar.bz2" -type f 2>/dev/null | sort -r | tail -n +3 | xargs rm -f
-
-    # For streaming downloads, we can't use --continue with piping
-    # Download to file first, then extract
-    local temp_file="$target_dir/photon-db.tar.bz2"
-
-    # Download with better options for large files
-    echo "Starting download of $(basename "$INDEX_URL")..."
-    if wget --user-agent="$USER_AGENT" \
-           --timeout=300 \
-           --tries=3 \
-           --continue \
-           --progress=dot:giga \
-           -O "$temp_file" "$INDEX_URL"; then
-
-        echo "Download completed, extracting..."
-        if bzip2 -dc "$temp_file" | tar x -C "$target_dir"; then
-            echo "Successfully downloaded and extracted index"
-
-            # Keep the compressed file for troubleshooting with timestamp
-            local timestamp
-            timestamp=$(date +"%Y%m%d_%H%M%S")
-            local saved_file="$troubleshoot_dir/photon-db-${timestamp}.tar.bz2"
-            echo "Saving compressed file for troubleshooting: $saved_file"
-            if cp "$temp_file" "$saved_file"; then
-                echo "Compressed file saved successfully"
-            else
-                echo "Warning: Failed to save compressed file for troubleshooting"
-            fi
-
-            # Remove temp file from target directory
-            rm -f "$temp_file"
-
-            # Handle nested photon_data directory structure
-            if [ -d "$target_dir/photon_data" ] && [ ! -d "$target_dir/node_1" ]; then
-                echo "Detected nested photon_data structure, flattening..."
-                # Move contents up one level
-                if mv "$target_dir/photon_data"/* "$target_dir/" 2>/dev/null; then
-                    rmdir "$target_dir/photon_data"
-                    echo "Successfully flattened directory structure"
-                else
-                    echo "Failed to flatten directory structure"
-                    rm -rf "$target_dir"
-                    return 1
-                fi
-            fi
-
-            return 0
-        else
-            echo "Failed to extract downloaded file"
-            rm -f "$temp_file"
-            rm -rf "$target_dir"
-            return 1
-        fi
-    else
-        local exit_code=$?
-        echo "Failed to download index (exit code: $exit_code)"
-        rm -f "$temp_file"
-        rm -rf "$target_dir"
+    if ! is_node_dir_valid "$target_dir/node_1"; then
+        log "ERROR: extracted archive does not contain a valid node_1 directory"
         return 1
     fi
+    return 0
 }
 
-# Function to download MD5 with retry logic
-download_md5() {
-    echo "Downloading MD5 checksum"
-    local temp_md5="$MD5_FILE.tmp"
-    local retries=3
-    local count=0
+# ---------- staging ----------
 
-    while [ "$count" -lt "$retries" ]; do
-        if wget --user-agent="$USER_AGENT" --timeout=30 --tries=2 -q -O "$temp_md5" "$MD5_URL"; then
-            # Validate MD5 format (32 hex characters)
-            local md5_value
-            md5_value=$(awk '{print $1}' "$temp_md5" 2>/dev/null | head -1 | tr -d '[:space:]' || echo "")
-            if [[ "$md5_value" =~ ^[a-fA-F0-9]{32}$ ]]; then
-                echo "$md5_value" > "$MD5_FILE"
-                rm -f "$temp_md5"
-                echo "MD5 checksum downloaded: $md5_value"
-                return 0
-            else
-                echo "Invalid MD5 format received: '$md5_value'"
-            fi
-        fi
-        count=$((count + 1))
-        if [ "$count" -lt "$retries" ]; then
-            echo "MD5 download attempt $count failed, retrying in 2 seconds..."
-            sleep 2
-        fi
-    done
+# If a staged index is present and valid, swap it into NODE_DIR before startup.
+apply_staged_index_if_present() {
+    [ -d "$STAGED_DIR" ] || return 0
+    if ! is_node_dir_valid "$STAGED_NODE"; then
+        log "Staged dir exists but is not valid; clearing it"
+        rm -rf "$STAGED_DIR"
+        return 0
+    fi
 
-    rm -f "$temp_md5"
-    echo "Failed to download MD5 checksum after $retries attempts"
-    return 1
+    log "Staged index found; applying before startup"
+    if [ -d "$NODE_DIR" ]; then
+        log "Removing current index at $NODE_DIR"
+        rm -rf "$NODE_DIR"
+    fi
+    if ! mv "$STAGED_NODE" "$NODE_DIR"; then
+        log "ERROR: failed to move staged index into place"
+        return 1
+    fi
+
+    if [ -f "$STAGED_MD5_FILE" ]; then
+        local v
+        if v=$(read_md5_file "$STAGED_MD5_FILE"); then
+            echo "$v" > "$LAST_MD5_FILE"
+            log "Recorded new index version: $v"
+        fi
+    fi
+
+    rm -rf "$STAGED_DIR"
+    log "Staged index applied"
 }
 
-# Function to start Photon in background
+stage_new_index() {
+    local new_md5="$1"
+    log "Staging new index (md5=$new_md5)"
+    rm -rf "$STAGED_DIR"
+    if ! download_and_extract "$STAGED_DIR"; then
+        log "Staging failed"
+        rm -rf "$STAGED_DIR"
+        return 1
+    fi
+    echo "$new_md5" > "$STAGED_MD5_FILE"
+    log "New index staged at $STAGED_DIR — will be applied on next container restart"
+    ntfy_send "Photon index update available" \
+        "A new Photon search index has been downloaded and staged. Restart the container to apply it. (md5=$new_md5)"
+    return 0
+}
+
+# ---------- photon ----------
+
 start_photon() {
-    echo "Starting Photon..."
+    log "Starting Photon..."
+    [ -f "photon.jar" ] || { log "ERROR: photon.jar not found in $(pwd)"; return 1; }
+    command -v java >/dev/null 2>&1 || { log "ERROR: java not in PATH"; return 1; }
 
-    # Check if photon.jar exists
-    if [ ! -f "photon.jar" ]; then
-        echo "ERROR: photon.jar not found in current directory: $(pwd)"
-        echo "Directory contents:"
-        ls -la
-        return 1
-    fi
-
-    # Check if Java is available
-    if ! command -v java >/dev/null 2>&1; then
-        echo "ERROR: Java is not installed or not in PATH"
-        return 1
-    fi
-
-    # Clean up any stale PID file
     if [ -f "$JAVA_PID_FILE" ]; then
-        local old_pid
-        old_pid=$(cat "$JAVA_PID_FILE" 2>/dev/null || echo "")
-        if [ -n "$old_pid" ] && ! is_process_running "$old_pid"; then
-            rm -f "$JAVA_PID_FILE"
-        elif [ -n "$old_pid" ]; then
-            echo "Warning: Photon already running with PID $old_pid"
+        local old
+        old=$(cat "$JAVA_PID_FILE" 2>/dev/null || echo "")
+        if [ -n "$old" ] && is_process_running "$old"; then
+            log "Photon already running with PID $old"
             return 1
         fi
+        rm -f "$JAVA_PID_FILE"
     fi
 
-    # Start Java process with Docker/cgroup compatibility flags
-    echo "Executing: java -jar photon.jar $*"
     java -XX:-UseContainerSupport \
          -XX:+UnlockDiagnosticVMOptions \
          -XX:+IgnoreUnrecognizedVMOptions \
          -Djdk.lang.Process.launchMechanism=vfork \
          -Dcom.sun.management.jmxremote=false \
          -jar photon.jar "$@" &
-    local java_pid=$!
-
-    # Check if the background process was started successfully
-    if [ -z "$java_pid" ] || [ "$java_pid" -le 0 ]; then
-        echo "ERROR: Failed to start Java process - invalid PID"
-        return 1
-    fi
-
-    echo "$java_pid" > "$JAVA_PID_FILE"
-    echo "Java process started with PID $java_pid, waiting for startup..."
-
-    # Wait a moment and verify it started
+    local pid=$!
+    [ -n "$pid" ] && [ "$pid" -gt 0 ] || { log "ERROR: failed to launch java"; return 1; }
+    echo "$pid" > "$JAVA_PID_FILE"
+    log "Java started (PID $pid), waiting for boot..."
     sleep 3
-    if is_process_running "$java_pid"; then
-        echo "Photon started successfully with PID $java_pid"
+    if is_process_running "$pid"; then
+        log "Photon up (PID $pid)"
         return 0
-    else
-        echo "ERROR: Photon process died shortly after startup"
-        echo "Checking if process exited with error..."
-        wait "$java_pid" 2>/dev/null || local exit_code=$?
-        if [ -n "${exit_code:-}" ]; then
-            echo "Java process exited with code: $exit_code"
-        fi
-        rm -f "$JAVA_PID_FILE"
-        return 1
     fi
+    log "ERROR: java exited shortly after launch"
+    rm -f "$JAVA_PID_FILE"
+    return 1
 }
 
-# Function to stop Photon gracefully
 stop_photon() {
-    if [ -f "$JAVA_PID_FILE" ]; then
-        local pid
-        pid=$(cat "$JAVA_PID_FILE" 2>/dev/null || echo "")
-        if [ -n "$pid" ] && is_process_running "$pid"; then
-            echo "Stopping Photon gracefully (PID: $pid)"
-            kill -TERM "$pid"  # Use TERM signal first
-
-            # Wait for graceful shutdown (up to 60 seconds for large index)
-            local count=0
-            while is_process_running "$pid" && [ "$count" -lt 60 ]; do
-                sleep 1
-                count=$((count + 1))
-                if [ $((count % 15)) -eq 0 ]; then
-                    echo "Waiting for graceful shutdown... (${count}s)"
-                fi
-            done
-
-            # Force kill if still running
-            if is_process_running "$pid"; then
-                echo "Force killing Photon (PID: $pid)"
-                kill -KILL "$pid" 2>/dev/null || true
-                sleep 2
-
-                # Final check
-                if is_process_running "$pid"; then
-                    echo "Warning: Process $pid may still be running"
-                fi
-            fi
-        fi
-        rm -f "$JAVA_PID_FILE"
-        echo "Photon stopped"
-    else
-        echo "No Photon PID file found"
-    fi
-}
-
-# Function to perform hot swap with enhanced safety
-perform_hot_swap() {
-    echo "Performing hot swap of search index"
-
-    # Clean up any previous failed attempts
-    rm -rf "$TEMP_DIR"
-
-    echo "Downloading new index to temporary location..."
-    if download_and_extract "$TEMP_DIR" "true"; then
-        # Debug: Show what was actually extracted
-        echo "Contents of temp directory after extraction:"
-        ls -la "$TEMP_DIR" || echo "Failed to list temp directory"
-
-        # Look for node directory with more flexibility
-        local node_source=""
-        if [ -d "$TEMP_DIR/node_1" ]; then
-            node_source="$TEMP_DIR/node_1"
-        elif [ -d "$TEMP_DIR/photon_data/node_1" ]; then
-            node_source="$TEMP_DIR/photon_data/node_1"
-        else
-            # Look for any directory that might contain the index data
-            local found_dirs
-            found_dirs=$(find "$TEMP_DIR" -name "node_*" -type d 2>/dev/null | head -1)
-            if [ -n "$found_dirs" ]; then
-                node_source="$found_dirs"
-                echo "Found alternative node directory: $node_source"
-            fi
-        fi
-
-        # Verify we found a valid node directory
-        if [ -n "$node_source" ] && [ -d "$node_source" ] && [ -n "$(ls -A "$node_source" 2>/dev/null)" ]; then
-            echo "Download successful, found valid node directory at: $node_source"
-            echo "Contents of node directory:"
-            ls -la "$node_source" | head -10
-
-            # Stop current Photon instance
-            stop_photon
-
-            # Atomic directory swap with backup
-            echo "Performing atomic directory swap"
-            local backup_dir="${NODE_DIR}.backup.$(date +%s)"
-
-            # Create backup of current directory
-            if [ -d "$NODE_DIR" ]; then
-                echo "Creating backup at $backup_dir"
-                if ! mv "$NODE_DIR" "$backup_dir"; then
-                    echo "ERROR: Failed to create backup"
-                    rm -rf "$TEMP_DIR"
-                    return 1
-                fi
-            fi
-
-            # Move new directory into place
-            echo "Moving new index into place from $node_source to $NODE_DIR"
-            if ! mv "$node_source" "$NODE_DIR"; then
-                echo "ERROR: Failed to move new directory, restoring backup"
-                if [ -d "$backup_dir" ]; then
-                    if ! mv "$backup_dir" "$NODE_DIR"; then
-                        echo "CRITICAL: Failed to restore backup! Manual intervention required."
-                    fi
-                fi
-                rm -rf "$TEMP_DIR"
-                return 1
-            fi
-
-            # Verify the new directory is valid
-            if [ -d "$NODE_DIR" ] && [ -n "$(ls -A "$NODE_DIR" 2>/dev/null)" ]; then
-                echo "Hot swap completed successfully"
-                # Clean up temp and old backup
-                rm -rf "$TEMP_DIR"
-                if [ -d "$backup_dir" ]; then
-                    rm -rf "$backup_dir"
-                fi
-                return 0
-            else
-                echo "ERROR: New directory is invalid, restoring backup"
-                rm -rf "$NODE_DIR"
-                if [ -d "$backup_dir" ]; then
-                    if ! mv "$backup_dir" "$NODE_DIR"; then
-                        echo "CRITICAL: Failed to restore backup! Manual intervention required."
-                    fi
-                fi
-                rm -rf "$TEMP_DIR"
-                return 1
-            fi
-        else
-            echo "Downloaded index structure is invalid"
-            echo "Expected to find node directory in temp location, but found:"
-            find "$TEMP_DIR" -type d 2>/dev/null | head -20
-            rm -rf "$TEMP_DIR"
-            return 1
-        fi
-    else
-        echo "Failed to download new index"
-        rm -rf "$TEMP_DIR"
-        return 1
-    fi
-}
-
-# Function to handle background update process
-run_background_update() {
-    local current_md5="$1"
-    shift  # Remove first argument, keep the rest for start_photon
-
-    echo "Waiting 15 seconds for service to stabilize before update..."
-    sleep 15
-    echo "Starting background update process"
-
-    if perform_hot_swap; then
-        echo "Update downloaded successfully, restarting service"
-        echo "$current_md5" > "$LAST_MD5_FILE"
-        if start_photon "$@"; then
-            echo "Service restarted with new index"
-            # Background process completed successfully
-            exit 0
-        else
-            echo "Failed to restart service after update"
-            # Don't exit 1 here as it would kill the container - just log the error
-            echo "Background update failed during service restart, keeping current version running"
-            exit 1
-        fi
-    else
-        echo "Hot swap failed, service continues with current version"
-        echo "Background update process completed - no changes made"
-        # Background process completed (failed but handled gracefully)
-        exit 0
-    fi
-}
-
-# Signal handlers for graceful shutdown
-cleanup_and_exit() {
-    echo "Received shutdown signal, cleaning up..."
-
-    # Stop background process if running
-    if [ -n "$BACKGROUND_PID" ] && is_process_running "$BACKGROUND_PID"; then
-        echo "Stopping background update process..."
-        kill -TERM "$BACKGROUND_PID" 2>/dev/null || true
-        # Wait briefly for background process to exit
-        local count=0
-        while is_process_running "$BACKGROUND_PID" && [ "$count" -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
+    [ -f "$JAVA_PID_FILE" ] || return 0
+    local pid
+    pid=$(cat "$JAVA_PID_FILE" 2>/dev/null || echo "")
+    if [ -n "$pid" ] && is_process_running "$pid"; then
+        log "Stopping Photon (PID $pid)"
+        kill -TERM "$pid"
+        local n=0
+        while is_process_running "$pid" && [ "$n" -lt 60 ]; do
+            sleep 1; n=$((n + 1))
         done
-        if is_process_running "$BACKGROUND_PID"; then
-            kill -KILL "$BACKGROUND_PID" 2>/dev/null || true
+        if is_process_running "$pid"; then
+            log "Force killing PID $pid"
+            kill -KILL "$pid" 2>/dev/null || true
         fi
     fi
+    rm -f "$JAVA_PID_FILE"
+}
 
-    # Stop Photon
+# ---------- update worker ----------
+
+update_check_loop() {
+    sleep 30  # let Photon stabilize before first check
+    while true; do
+        if [ -d "$STAGED_DIR" ] && is_node_dir_valid "$STAGED_NODE"; then
+            log "Update check: staged index already waiting; skipping"
+        else
+            log "Update check: fetching remote MD5"
+            local remote_md5 last_md5
+            if remote_md5=$(fetch_remote_md5); then
+                last_md5=$(read_md5_file "$LAST_MD5_FILE" 2>/dev/null || echo "")
+                if [ "$remote_md5" = "$last_md5" ]; then
+                    log "Update check: index is up to date ($remote_md5)"
+                else
+                    log "Update check: new version available (current=${last_md5:-unknown} remote=$remote_md5)"
+                    if ! stage_new_index "$remote_md5"; then
+                        log "Update check: staging failed; will retry next interval"
+                    fi
+                fi
+            else
+                log "Update check: failed to fetch remote MD5"
+            fi
+        fi
+        sleep "$UPDATE_CHECK_INTERVAL_SECONDS"
+    done
+}
+
+# ---------- shutdown ----------
+
+cleanup_and_exit() {
+    log "Received shutdown signal"
+    if [ -n "$BACKGROUND_PID" ] && is_process_running "$BACKGROUND_PID"; then
+        kill -TERM "$BACKGROUND_PID" 2>/dev/null || true
+    fi
     stop_photon
-
-    # Clean up temp files
-    rm -rf "$TEMP_DIR"
-
     exit 0
 }
 
 trap cleanup_and_exit SIGTERM SIGINT
 
-# Main logic
-echo "=== Photon Docker Entrypoint ==="
+# ---------- main ----------
 
-# Ensure data directory exists
-if ! mkdir -p "$DATA_DIR"; then
-    echo "ERROR: Failed to create data directory: $DATA_DIR"
-    exit 1
-fi
+log "=== Photon Docker Entrypoint ==="
+mkdir -p "$DATA_DIR"
 
-# Try to download the current MD5 (non-fatal if it fails)
-if ! download_md5; then
-    echo "Warning: Could not download MD5, will proceed without version checking"
-fi
+# 1. If a staged index from a prior run is present, apply it now.
+apply_staged_index_if_present
 
-# Check if index exists
-if [ -d "$NODE_DIR" ] && [ -n "$(ls -A "$NODE_DIR" 2>/dev/null)" ]; then
-    echo "Search index exists, checking for updates"
-
-    # Compare MD5 if we have both files
-    current_md5=""
-    last_md5=""
-
-    if current_md5=$(read_md5_file "$MD5_FILE") && last_md5=$(read_md5_file "$LAST_MD5_FILE"); then
-        echo "Current MD5: $current_md5"
-        echo "Last known MD5: $last_md5"
-
-        if [ "$current_md5" != "$last_md5" ]; then
-            echo "MD5 mismatch detected - new version available"
-            echo "Starting current instance while preparing update"
-
-            # Start current instance
-            if start_photon "$@"; then
-                MAIN_PID=$(cat "$JAVA_PID_FILE")
-
-                # Perform hot swap in background
-                run_background_update "$current_md5" "$@" &
-                BACKGROUND_PID=$!
-
-                # Wait for main Java process only (let background update run independently)
-                wait "$MAIN_PID"
-            else
-                echo "Failed to start Photon with existing index"
-                exit 1
-            fi
-        else
-            echo "Index is up to date"
-            if start_photon "$@"; then
-                MAIN_PID=$(cat "$JAVA_PID_FILE")
-                wait "$MAIN_PID"
-            else
-                echo "Failed to start Photon"
-                exit 1
-            fi
-        fi
-    elif current_md5=$(read_md5_file "$MD5_FILE"); then
-        # First time with MD5 - mark current version
-        echo "First time setup - marking current version"
-        echo "$current_md5" > "$LAST_MD5_FILE"
-        if start_photon "$@"; then
-            MAIN_PID=$(cat "$JAVA_PID_FILE")
-            wait "$MAIN_PID"
-        else
-            echo "Failed to start Photon"
-            exit 1
-        fi
-    else
-        echo "Could not verify MD5, starting with existing index"
-        if start_photon "$@"; then
-            MAIN_PID=$(cat "$JAVA_PID_FILE")
-            wait "$MAIN_PID"
-        else
-            echo "Failed to start Photon"
-            exit 1
-        fi
-    fi
-else
-    echo "No search index found, downloading initial version"
-
-    if download_and_extract "$DATA_DIR" "false"; then
-        current_md5=""
-        if current_md5=$(read_md5_file "$MD5_FILE"); then
-            echo "$current_md5" > "$LAST_MD5_FILE"
-        fi
-
-        if [ -d "$NODE_DIR" ] && [ -n "$(ls -A "$NODE_DIR" 2>/dev/null)" ]; then
-            echo "Initial download completed, starting Photon"
-            if start_photon "$@"; then
-                MAIN_PID=$(cat "$JAVA_PID_FILE")
-                wait "$MAIN_PID"
-            else
-                echo "Failed to start Photon after initial download"
-                exit 1
-            fi
-        else
-            echo "Could not start photon, the search index could not be found after download"
-            exit 1
-        fi
-    else
-        echo "Could not download search index"
+# 2. If we still have no index, do the initial download in-place.
+if ! is_node_dir_valid "$NODE_DIR"; then
+    log "No index present — performing initial download"
+    if ! download_and_extract "$DATA_DIR"; then
+        log "ERROR: initial download failed"
         exit 1
     fi
+    if remote_md5=$(fetch_remote_md5); then
+        echo "$remote_md5" > "$LAST_MD5_FILE"
+    fi
 fi
+
+# 3. Start Photon.
+if ! start_photon "$@"; then
+    log "ERROR: Photon failed to start"
+    exit 1
+fi
+MAIN_PID=$(cat "$JAVA_PID_FILE")
+
+# 4. Background loop: poll for new index versions and stage them.
+update_check_loop &
+BACKGROUND_PID=$!
+log "Update checker running (PID $BACKGROUND_PID, interval ${UPDATE_CHECK_INTERVAL_SECONDS}s)"
+
+# 5. Wait on Photon.
+wait "$MAIN_PID"

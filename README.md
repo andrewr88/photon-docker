@@ -37,6 +37,21 @@ docker-compose up
 *Note: if you abort the download, you have to remove the volume `photon_data` before restarting the container*
 
 
+## Updates
+
+The container periodically polls for new versions of the search index. When one is found, the new index is downloaded into `/photon/photon_data/staged/` while Photon keeps serving the old index. On the next container restart, the staged index is moved into place before Photon starts.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `UPDATE_CHECK_INTERVAL_SECONDS` | `86400` | How often to poll for a new index. |
+| `NTFY_URL` | _unset_ | Base URL of an [ntfy](https://ntfy.sh) server (e.g. `https://ntfy.sh`). |
+| `NTFY_TOPIC` | _unset_ | ntfy topic to post to. |
+| `NTFY_TOKEN` | _unset_ | Bearer token used for ntfy auth. |
+
+When all three `NTFY_*` variables are set, a notification is sent every time a new index has been staged so you know it's time to restart the container.
+
 ## FAQ
 
  - How do I pass arguments to the `photon.jar` ?
