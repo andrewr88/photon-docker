@@ -1,4 +1,4 @@
-FROM openjdk:11.0.16-jre
+FROM eclipse-temurin:25.0.2_10-jre
 ARG PHOTON_VERSION=1.1.0
 
 # Install pbzip2 for parallel extraction
