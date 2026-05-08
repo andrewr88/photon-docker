@@ -126,7 +126,7 @@ download_and_extract() {
     fi
 
     log "Extracting..."
-    if ! bzip2 -dc "$archive" | tar x -C "$target_dir"; then
+    if ! pbzip2 -dc "$archive" | tar x -C "$target_dir"; then
         log "Extraction failed"
         rm -f "$archive"
         return 1
