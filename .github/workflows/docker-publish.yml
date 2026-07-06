@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # Extract PHOTON_VERSION from Dockerfile
       - name: Extract PHOTON_VERSION from Dockerfile
