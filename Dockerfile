@@ -1,5 +1,5 @@
 FROM eclipse-temurin:25.0.3_9-jre
-ARG PHOTON_VERSION=1.1.0
+ARG PHOTON_VERSION=1.2.1
 
 # Install pbzip2 for parallel extraction
 RUN apt-get update \
